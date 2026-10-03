@@ -1,0 +1,12 @@
+{
+  "id": "m12ohan/dg-prose-diffusion",
+  "title": "Dg Prose Diffusion",
+  "code_file": "dg-prose-diffusion.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "tpu_vm": false,
+  "dataset_sources": []
+}
