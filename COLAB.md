@@ -1,153 +1,68 @@
-# DiffusionGemma prose eval - Colab cells
+# DiffusionGemma prose eval - Colab
 
 Source of truth: <https://github.com/12ohan/dg-prose-eval>
 
-**Cell 0 is the only block you copy by hand.** It clones the repo, which
-already contains `generate.py`, `prompts.py` and `metrics.py`. Everything
-after that reads from the clone, so you never re-copy code. Re-run Cell 0 to
-pick up changes I push.
+**Three steps.**
 
-| Cell | What | Weights |
+| # | Command | Weights |
 |---|---|---|
-| 0 | clone the repo | no |
-| 1 | install + landmine workarounds | no |
-| 2 | verify install, print devices | no |
-| 3 | generate | **yes** - ~50 GB from `gs://gemma-data/` |
+| 1 | `!cd /content/dg && git pull --ff-only` | no |
+| 2 | `!python /content/dg/nb/setup_and_verify.py` | no |
+| 3 | Cell 3 block below | **yes** - ~50 GB device memory |
 
-Cells 0-2 load **zero** weights and finish in a couple of minutes. Run those
-first. If Cell 2 prints `diff ckpt`, the environment is sound and Cell 3 is
-where the real cost starts.
+Step 2 installs *and* verifies in one interpreter. There is deliberately no
+separate install cell: the old `cell1_install.py` pinned `numpy<2`, which has
+no Python 3.13 wheels, so it could never work on Colab. It has been removed.
+
+Re-run step 1 whenever I push; step 2 is idempotent.
 
 ---
 
-## Cell 0 - clone
+## Step 1 - pull
 
-One line, re-runnable. It deletes any previous checkout first so you always
-get a clean tree rather than a merge conflict.
+If `/content/dg` does not exist yet, clone it first with the Step 0 block
+at the bottom of this file. Otherwise:
 
-Once the repo is public this is all you need. If you later make it private
-again, either enable Colab's GitHub connector (Settings > Integrations) or
-put a token in Colab Secrets named `GITHUB_TOKEN` and prefix the clone with
-the authorization header shown below Cell 0's block.
+```
+!cd /content/dg && git pull --ff-only && git log --oneline -1
+```
 
-```python
-import shutil
-import subprocess
-from pathlib import Path
-
-REPO_URL = "https://github.com/12ohan/dg-prose-eval.git"
-DEST = Path("/content/dg")
-
-if DEST.exists():
-    shutil.rmtree(DEST)          # re-runnable: always fetch a clean tree
-
-# plain subprocess rather than !git so there is no dependency on IPython
-# magic variable interpolation -- this cell parses as ordinary Python
-subprocess.run(["git", "clone", "--depth", "1", REPO_URL, str(DEST)], check=True)
-
-head = subprocess.run(["git", "log", "--oneline", "-1"], cwd=DEST,
-                      capture_output=True, text=True).stdout.strip()
-print("cloned at", head)
-print("files:", sorted(p.name for p in (DEST / "nb").iterdir() if p.suffix == ".py"))
+```
+!cd /content/dg && git pull --ff-only && git log --oneline -1
 ```
 
 ---
 
-## Cell 1 - install
+## Step 2 - install and verify
 
-Three landmines, each of which fails the install outright. Validated in a
-clean venv; details at the bottom of this file.
+One script, one interpreter. Prints `python:` first, then each install step
+as `ok`/`FAIL`, then the import check. Success ends with `diff ckpt:` and
+`>>> ENVIRONMENT SOUND.`
 
-```python
-# DiffusionGemma prose eval -- install
-# Three landmines, each of which fails the install outright:
-#   1. PyPI `gemma` 4.0.1 has NO `diffusion` module -> install from git (4.1.0)
-#   2. `tensorflow-cpu` removed from PyPI, still pinned by gemma+kauldron -> stub
-#   3. kauldron imports np.float128, removed in numpy 2 -> pin numpy<2
-import pathlib
-import subprocess
-import sys
-import time
+```
+!python /content/dg/nb/setup_and_verify.py
+```
 
-
-def sh(cmd):
-    t = time.time()
-    p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    ok = p.returncode == 0
-    print(f"[{'ok ' if ok else 'FAIL'}] {cmd[:72]}  ({time.time() - t:.0f}s)", flush=True)
-    if not ok:
-        print((p.stderr or p.stdout)[-1200:], flush=True)
-    return ok
-
-
-sh(f"{sys.executable} -m pip install -q tensorflow")
-
-_d = pathlib.Path("/tmp/tfstub")
-_d.mkdir(exist_ok=True)
-(_d / "setup.py").write_text(
-    "from setuptools import setup\n"
-    "setup(name='tensorflow-cpu', version='2.21.0', install_requires=['tensorflow'])\n"
-)
-sh(f"{sys.executable} -m pip install -q {_d}")
-
-sh(f'{sys.executable} -m pip install -q "numpy<2"')
-sh(f'{sys.executable} -m pip install -q "git+https://github.com/google-deepmind/gemma.git"')
+```
+!python /content/dg/nb/setup_and_verify.py
 ```
 
 ---
 
-## Cell 2 - verify (weightless)
+## Step 3 - generate
 
-Confirms jax sees the right backend and that `gemma.diffusion` actually
-imported. If `diff ckpt` prints, the install is sound. Seconds, no download.
+Needs >=50 GB of **device** memory (HBM/VRAM), not system RAM. JAX loads
+parameters onto the accelerator.
 
-```python
-# Weightless verification: loads NO weights, so it costs seconds not 50 GB.
-# If "diff ckpt" prints, the install is sound and cell 4 will work.
-import subprocess
-import sys
+| Runtime | Device mem | Works? |
+|---|---|---|
+| Colab TPU v5e-1 | 15.7 GiB | no |
+| Colab CLI `--gpu A100` / `H100` | 80 GB | yes, one model |
+| Kaggle TPU v5e-8 | 128 GB | yes, one model comfortably |
 
-CHECK = r'''
-import jax
-print("jax     :", jax.__version__, "| backend", jax.default_backend())
-devs = jax.devices()
-print("devices :", len(devs), devs[0].device_kind)
-try:
-    gb = devs[0].memory_stats().get("bytes_limit", 0) / 2**30
-    print(f"hbm     : {gb:.1f} GiB per device")
-except Exception:
-    pass
-
-from gemma import gm, diffusion
-print("diff ckpt:", diffusion.CheckpointPath.DIFFUSIONGEMMA_26B_A4B_IT.value)
-print("ar   ckpt:", gm.ckpts.CheckpointPath.GEMMA4_26B_A4B_IT.value)
-
-import dataclasses, inspect
-for cls in (gm.text.ChatSampler, diffusion.ChatSampler):
-    f = {x.name for x in dataclasses.fields(cls)}
-    print(f"{cls.__module__}.{cls.__name__}: {len(f)} fields")
-print("ChatSampler subclass of gm.text.ChatSampler:",
-      issubclass(diffusion.ChatSampler, gm.text.ChatSampler))
-'''
-
-r = subprocess.run([sys.executable, "-c", CHECK], capture_output=True, text=True)
-print(r.stdout.strip())
-if r.returncode:
-    print("STDERR:", r.stderr.strip()[-2000:])
-if "diff ckpt" not in r.stdout:
-    raise SystemExit("INSTALL VERIFICATION FAILED -- do not proceed to cell 4")
-print("\nOK: environment is sound.")
-```
-
----
-
-## Cell 3 - generate
-
-First run downloads ~50 GB from the public bucket - budget 5-15 min. The
-first `sampler.chat` JIT-compiles for another 1-2 min, once.
-
-Set `MODEL` to `"diffusion"` or `"ar"`. Run it twice, once each. Never both in
-one session - two 26B models is ~100 GB.
+First run downloads ~50 GB from the public bucket (5-15 min) and JIT-compiles
+for 1-2 min. Run once with `MODEL = "diffusion"`, then once with `"ar"`,
+in separate sessions.
 
 ```python
 import os
@@ -155,13 +70,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path("/content/dg")           # where Cell 0 cloned
-MODEL = "diffusion"                  # <- "diffusion" or "ar"
+REPO = Path("/content/dg")
+MODEL = "diffusion"                  # <- run once as "diffusion", then "ar"
 OUT = REPO / "out"
 OUT.mkdir(parents=True, exist_ok=True)
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
-print("loading ~50 GB of weights (first run downloads), then JIT compiling...")
 r = subprocess.run(
     [sys.executable, str(REPO / "nb" / "generate.py"),
      "--model", MODEL, "--out", str(OUT / f"{MODEL}.jsonl")],
@@ -182,29 +96,43 @@ else:
     print("no output file")
 ```
 
+---
+
+## Step 0 - first-time clone only
+
 ```python
-# private-repo variant, if you ever flip it back:
-#   from google.colab import userdata
-#   tok = userdata.get("GITHUB_TOKEN")
-#   !git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' '{tok}' | base64)" \
-#       clone --depth 1 https://github.com/12ohan/dg-prose-eval.git /content/dg
+from pathlib import Path
+D = Path("/content/dg")
+if D.exists():
+    shutil.rmtree(D)
+subprocess.run(["git", "clone", "--depth", "1", "https://github.com/12ohan/dg-prose-eval.git", str(D)], check=True)
+print(subprocess.run(["git", "-C", str(D), "log", "--oneline", "-1"],
+                     capture_output=True, text=True).stdout)
 ```
 
 ---
 
-## Notes on the three landmines
+## What broke along the way
 
 1. **PyPI `gemma` 4.0.1 has no `diffusion` module.** Google's own Colab
-   example assumes `!pip install -q gemma` then `from gemma import diffusion`
-   - that does not work against the current PyPI release. Git `main` is
-   4.1.0 and does have it, so install from git.
+   example assumes `pip install gemma` then `from gemma import diffusion`.
+   That does not work against the current PyPI release. Git `main` is 4.1.0
+   and has it, so `setup_and_verify.py` installs from git.
 
-2. **`tensorflow-cpu` was removed from PyPI**, but `gemma` and `kauldron`
-   both still hard-pin it, so pip cannot resolve the install at all. The fix
-   is a three-line stub package that forwards to `tensorflow`, which is the
-   real package now.
+2. **`tensorflow-cpu` was removed from PyPI**, but `gemma` and `kauldron` both
+   still hard-pin it, so pip cannot resolve the install at all. Fixed with a
+   three-line stub package that forwards to `tensorflow`, the real package now.
 
-3. **kauldron imports `np.float128`**, removed in numpy 2. Hence `numpy<2`.
+3. **kauldron uses `np.float128`**, removed in numpy 2. Pinning `numpy<2` was
+   the first attempt and it fails on Python 3.13 (Colab's version): numpy<2
+   has no 3.13 wheels, so pip built from source for 144s and died. Current fix
+   is a `sitecustomize.py` written into site-packages that restores
+   `np.float128 = np.longdouble` at interpreter startup. Portable across
+   Python versions and it propagates to every subprocess.
+
+4. **`Cannot uninstall PyJWT 2.7.0`** - apt-installed with no RECORD file, so
+   pip refuses to remove it. Handled with `--break-system-packages` plus
+   `--ignore-installed`.
 
 ## Verified against installed source, not docs
 
@@ -213,32 +141,31 @@ else:
 - All 7 `diffusion.ChatSampler` kwargs used by `generate.py` are valid:
   `model`, `params`, `tokenizer`, `pad_length`, `max_out_length` inherited;
   `canvas_length`, `max_denoising_steps` are its own fields.
-- All 3 `gm.text.ChatSampler` kwargs are valid: `model`, `params`,
-  `multi_turn`.
+- All 3 `gm.text.ChatSampler` kwargs are valid: `model`, `params`, `multi_turn`.
 - `gm.ckpts.load_params` accepts `restore_concurrent_gb`, `text_only` and
-  `quantize`. `text_only` / `quantize` are the lever for later if both
-  towers ever need to be resident at once.
+  `quantize`. `text_only` / `quantize` are the lever for later if both towers
+  ever need to be resident at once.
 
-## Local analysis (your Mac, not Colab)
+## Local analysis (your Mac)
 
-Once you have both `out/diffusion.jsonl` and `out/ar.jsonl`:
+With both `out/diffusion.jsonl` and `out/ar.jsonl`:
 
 ```
 python nb/analyze.py out/diffusion.jsonl out/ar.jsonl
 ```
 
-Paired comparison, bootstrap 95% CIs, broken out per prompt category. Then
-with `GOOGLE_API_KEY` set:
+Paired comparison, bootstrap 95% CIs, per prompt category. Then with
+`GOOGLE_API_KEY` set:
 
 ```
 python nb/judge.py out/diffusion.jsonl out/ar.jsonl
 ```
 
-Blind pairwise judging, each pair judged twice with the order swapped; only
-order-invariant verdicts are counted.
+Blind pairwise judging, each pair judged twice with order swapped; only
+order-invariant verdicts count.
 
 ## Decision rule
 
 If diffusion wins on `rep_4` / `content_overuse` on the `repetition` category
-with a CI that excludes zero, the hypothesis holds and the two-tower work is
-worth doing. If it wins nowhere or loses, that is worth a month saved.
+with a CI excluding zero, the hypothesis holds and the two-tower work is worth
+doing. If it wins nowhere or loses, that is a month saved.

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Emit COLAB.md: the notebook cells, labelled, ready to paste into Colab.
+"""Emit COLAB.md from the repo's real state.
 
-The repo is the single source of truth. COLAB.md only carries Cell 0 (clone)
-plus the install/verify/generate cells; generate.py, prompts.py and metrics.py
-are read straight out of the clone, so nothing is ever duplicated here and
-there is no drift to guard against.
+Deliberately minimal: three steps, and step 2 is a single script that both
+installs and verifies. There is no separate install cell and no separate
+verify cell -- having those as two scripts is what produced the "which cell
+do I run" confusion, and the old cell1_install.py carried a `numpy<2` pin
+that cannot work on Python 3.13.
 
     python make_colab_md.py
 """
@@ -17,97 +18,73 @@ ROOT = pathlib.Path(__file__).parent
 NB = ROOT / "nb"
 REPO_URL = "https://github.com/12ohan/dg-prose-eval.git"
 
-TITLE = f"""# DiffusionGemma prose eval - Colab cells
+TITLE = f"""# DiffusionGemma prose eval - Colab
 
 Source of truth: <https://github.com/12ohan/dg-prose-eval>
 
-**Cell 0 is the only block you copy by hand.** It clones the repo, which
-already contains `generate.py`, `prompts.py` and `metrics.py`. Everything
-after that reads from the clone, so you never re-copy code. Re-run Cell 0 to
-pick up changes I push.
+**Three steps.**
 
-| Cell | What | Weights |
+| # | Command | Weights |
 |---|---|---|
-| 0 | clone the repo | no |
-| 1 | install + landmine workarounds | no |
-| 2 | verify install, print devices | no |
-| 3 | generate | **yes** - ~50 GB from `gs://gemma-data/` |
+| 1 | `!cd /content/dg && git pull --ff-only` | no |
+| 2 | `!python /content/dg/nb/setup_and_verify.py` | no |
+| 3 | Cell 3 block below | **yes** - ~50 GB device memory |
 
-Cells 0-2 load **zero** weights and finish in a couple of minutes. Run those
-first. If Cell 2 prints `diff ckpt`, the environment is sound and Cell 3 is
-where the real cost starts.
+Step 2 installs *and* verifies in one interpreter. There is deliberately no
+separate install cell: the old `cell1_install.py` pinned `numpy<2`, which has
+no Python 3.13 wheels, so it could never work on Colab. It has been removed.
+
+Re-run step 1 whenever I push; step 2 is idempotent.
 """
 
-LEAD = {
-    0: f"""## Cell 0 - clone
+STEP1 = """## Step 1 - pull
 
-One line, re-runnable. It deletes any previous checkout first so you always
-get a clean tree rather than a merge conflict.
+If `/content/dg` does not exist yet, clone it first with the Step 0 block
+at the bottom of this file. Otherwise:
 
-Once the repo is public this is all you need. If you later make it private
-again, either enable Colab's GitHub connector (Settings > Integrations) or
-put a token in Colab Secrets named `GITHUB_TOKEN` and prefix the clone with
-the authorization header shown below Cell 0's block.
-""",
-    1: """## Cell 1 - install
-
-Three landmines, each of which fails the install outright. Validated in a
-clean venv; details at the bottom of this file.
-""",
-    2: """## Cell 2 - verify (weightless)
-
-Confirms jax sees the right backend and that `gemma.diffusion` actually
-imported. If `diff ckpt` prints, the install is sound. Seconds, no download.
-""",
-    3: """## Cell 3 - generate
-
-First run downloads ~50 GB from the public bucket - budget 5-15 min. The
-first `sampler.chat` JIT-compiles for another 1-2 min, once.
-
-Set `MODEL` to `"diffusion"` or `"ar"`. Run it twice, once each. Never both in
-one session - two 26B models is ~100 GB.
-""",
-}
-
-CELL0 = '''import shutil
-import subprocess
-from pathlib import Path
-
-REPO_URL = "https://github.com/12ohan/dg-prose-eval.git"
-DEST = Path("/content/dg")
-
-if DEST.exists():
-    shutil.rmtree(DEST)          # re-runnable: always fetch a clean tree
-
-# plain subprocess rather than !git so there is no dependency on IPython
-# magic variable interpolation -- this cell parses as ordinary Python
-subprocess.run(["git", "clone", "--depth", "1", REPO_URL, str(DEST)], check=True)
-
-head = subprocess.run(["git", "log", "--oneline", "-1"], cwd=DEST,
-                      capture_output=True, text=True).stdout.strip()
-print("cloned at", head)
-print("files:", sorted(p.name for p in (DEST / "nb").iterdir() if p.suffix == ".py"))
-'''
-
-CELL0_PRIVATE = """# private-repo variant, if you ever flip it back:
-#   from google.colab import userdata
-#   tok = userdata.get("GITHUB_TOKEN")
-#   !git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' '{tok}' | base64)" \\
-#       clone --depth 1 https://github.com/12ohan/dg-prose-eval.git /content/dg
+```
+!cd /content/dg && git pull --ff-only && git log --oneline -1
+```
 """
 
-CELL3 = '''import os
+STEP2 = """## Step 2 - install and verify
+
+One script, one interpreter. Prints `python:` first, then each install step
+as `ok`/`FAIL`, then the import check. Success ends with `diff ckpt:` and
+`>>> ENVIRONMENT SOUND.`
+
+```
+!python /content/dg/nb/setup_and_verify.py
+```
+"""
+
+STEP3 = """## Step 3 - generate
+
+Needs >=50 GB of **device** memory (HBM/VRAM), not system RAM. JAX loads
+parameters onto the accelerator.
+
+| Runtime | Device mem | Works? |
+|---|---|---|
+| Colab TPU v5e-1 | 15.7 GiB | no |
+| Colab CLI `--gpu A100` / `H100` | 80 GB | yes, one model |
+| Kaggle TPU v5e-8 | 128 GB | yes, one model comfortably |
+
+First run downloads ~50 GB from the public bucket (5-15 min) and JIT-compiles
+for 1-2 min. Run once with `MODEL = "diffusion"`, then once with `"ar"`,
+in separate sessions.
+"""
+
+STEP3_CODE = '''import os
 import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path("/content/dg")           # where Cell 0 cloned
-MODEL = "diffusion"                  # <- "diffusion" or "ar"
+REPO = Path("/content/dg")
+MODEL = "diffusion"                  # <- run once as "diffusion", then "ar"
 OUT = REPO / "out"
 OUT.mkdir(parents=True, exist_ok=True)
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
-print("loading ~50 GB of weights (first run downloads), then JIT compiling...")
 r = subprocess.run(
     [sys.executable, str(REPO / "nb" / "generate.py"),
      "--model", MODEL, "--out", str(OUT / f"{MODEL}.jsonl")],
@@ -128,21 +105,43 @@ else:
     print("no output file")
 '''
 
+STEP0 = f"""## Step 0 - first-time clone only
+
+```
+import shutil, subprocess
+from pathlib import Path
+D = Path("/content/dg")
+if D.exists():
+    shutil.rmtree(D)
+subprocess.run(["git", "clone", "--depth", "1", "{REPO_URL}", str(D)], check=True)
+print(subprocess.run(["git", "-C", str(D), "log", "--oneline", "-1"],
+                     capture_output=True, text=True).stdout)
+```
+"""
+
 NOTES = """---
 
-## Notes on the three landmines
+## What broke along the way
 
 1. **PyPI `gemma` 4.0.1 has no `diffusion` module.** Google's own Colab
-   example assumes `!pip install -q gemma` then `from gemma import diffusion`
-   - that does not work against the current PyPI release. Git `main` is
-   4.1.0 and does have it, so install from git.
+   example assumes `pip install gemma` then `from gemma import diffusion`.
+   That does not work against the current PyPI release. Git `main` is 4.1.0
+   and has it, so `setup_and_verify.py` installs from git.
 
-2. **`tensorflow-cpu` was removed from PyPI**, but `gemma` and `kauldron`
-   both still hard-pin it, so pip cannot resolve the install at all. The fix
-   is a three-line stub package that forwards to `tensorflow`, which is the
-   real package now.
+2. **`tensorflow-cpu` was removed from PyPI**, but `gemma` and `kauldron` both
+   still hard-pin it, so pip cannot resolve the install at all. Fixed with a
+   three-line stub package that forwards to `tensorflow`, the real package now.
 
-3. **kauldron imports `np.float128`**, removed in numpy 2. Hence `numpy<2`.
+3. **kauldron uses `np.float128`**, removed in numpy 2. Pinning `numpy<2` was
+   the first attempt and it fails on Python 3.13 (Colab's version): numpy<2
+   has no 3.13 wheels, so pip built from source for 144s and died. Current fix
+   is a `sitecustomize.py` written into site-packages that restores
+   `np.float128 = np.longdouble` at interpreter startup. Portable across
+   Python versions and it propagates to every subprocess.
+
+4. **`Cannot uninstall PyJWT 2.7.0`** - apt-installed with no RECORD file, so
+   pip refuses to remove it. Handled with `--break-system-packages` plus
+   `--ignore-installed`.
 
 ## Verified against installed source, not docs
 
@@ -151,63 +150,55 @@ NOTES = """---
 - All 7 `diffusion.ChatSampler` kwargs used by `generate.py` are valid:
   `model`, `params`, `tokenizer`, `pad_length`, `max_out_length` inherited;
   `canvas_length`, `max_denoising_steps` are its own fields.
-- All 3 `gm.text.ChatSampler` kwargs are valid: `model`, `params`,
-  `multi_turn`.
+- All 3 `gm.text.ChatSampler` kwargs are valid: `model`, `params`, `multi_turn`.
 - `gm.ckpts.load_params` accepts `restore_concurrent_gb`, `text_only` and
-  `quantize`. `text_only` / `quantize` are the lever for later if both
-  towers ever need to be resident at once.
+  `quantize`. `text_only` / `quantize` are the lever for later if both towers
+  ever need to be resident at once.
 
-## Local analysis (your Mac, not Colab)
+## Local analysis (your Mac)
 
-Once you have both `out/diffusion.jsonl` and `out/ar.jsonl`:
+With both `out/diffusion.jsonl` and `out/ar.jsonl`:
 
 ```
 python nb/analyze.py out/diffusion.jsonl out/ar.jsonl
 ```
 
-Paired comparison, bootstrap 95% CIs, broken out per prompt category. Then
-with `GOOGLE_API_KEY` set:
+Paired comparison, bootstrap 95% CIs, per prompt category. Then with
+`GOOGLE_API_KEY` set:
 
 ```
 python nb/judge.py out/diffusion.jsonl out/ar.jsonl
 ```
 
-Blind pairwise judging, each pair judged twice with the order swapped; only
-order-invariant verdicts are counted.
+Blind pairwise judging, each pair judged twice with order swapped; only
+order-invariant verdicts count.
 
 ## Decision rule
 
 If diffusion wins on `rep_4` / `content_overuse` on the `repetition` category
-with a CI that excludes zero, the hypothesis holds and the two-tower work is
-worth doing. If it wins nowhere or loses, that is worth a month saved.
+with a CI excluding zero, the hypothesis holds and the two-tower work is worth
+doing. If it wins nowhere or loses, that is a month saved.
 """
 
 
-def fence(body: str) -> str:
-    return f"```python\n{body.rstrip()}\n```\n"
-
-
 def main() -> None:
-    cells = {
-        0: CELL0.rstrip(),
-        1: (NB / "cell1_install.py").read_text().rstrip(),
-        2: (NB / "cell2_verify.py").read_text().rstrip(),
-        3: CELL3.rstrip(),
-    }
-    parts = [TITLE]
-    for n in (0, 1, 2, 3):
-        parts += ["---\n", LEAD[n], fence(cells[n])]
-    parts += ["```python\n" + CELL0_PRIVATE.strip() + "\n```\n", NOTES]
-
-    md = "\n".join(parts)
+    md = "\n".join([
+        TITLE,
+        "---\n", STEP1, "```\n" + STEP1.split("```")[1].strip() + "\n```\n",
+        "---\n", STEP2, "```\n" + STEP2.split("```")[1].strip() + "\n```\n",
+        "---\n", STEP3, "```python\n" + STEP3_CODE.strip() + "\n```\n",
+        "---\n", "## Step 0 - first-time clone only\n",
+        "```python\n" + STEP0.split("```")[1].strip().split("\n", 1)[1].strip()
+        + "\n```\n",
+        NOTES,
+    ])
     (ROOT / "COLAB.md").write_text(md)
 
     nf = md.count("```")
     assert nf % 2 == 0, f"unbalanced fences: {nf}"
-    for n in (0, 1, 2, 3):
-        assert f"## Cell {n} -" in md, f"missing heading for cell {n}"
-    assert REPO_URL in md
-    print(f"wrote COLAB.md  ({len(md):,} bytes, {nf // 2} blocks, 4 cells)")
+    for s in ("Step 0", "Step 1", "Step 2", "Step 3"):
+        assert s in md, f"missing {s}"
+    print(f"wrote COLAB.md ({len(md):,} bytes, {nf // 2} blocks)")
 
 
 if __name__ == "__main__":
