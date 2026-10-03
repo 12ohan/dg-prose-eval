@@ -67,13 +67,13 @@ def build_diffusion_sampler():
     return sampler
 
 
-def build_ar_sampler():
+def build_ar_sampler(size: str = "26B_A4B"):
     from gemma import gm
-    print("[load] Gemma 4 26B-A4B-it (AR) ...", flush=True)
+    print(f"[load] Gemma 4 {size}-it (AR) ...", flush=True)
     t0 = time.time()
-    model = gm.nn.Gemma4_26B_A4B()
+    model = getattr(gm.nn, f"Gemma4_{size}")()
     params = gm.ckpts.load_params(
-        gm.ckpts.CheckpointPath.GEMMA4_26B_A4B_IT,
+        getattr(gm.ckpts.CheckpointPath, f"GEMMA4_{size}_IT"),
         restore_concurrent_gb=16,
     )
     print(f"[load] done in {time.time() - t0:.0f}s", flush=True)
@@ -89,13 +89,23 @@ def main() -> None:
                     help="restrict to one prompt category")
     ap.add_argument("--limit", type=int, default=0, help="0 = all prompts")
     ap.add_argument("--warmup", action="store_true", default=True)
+    ap.add_argument("--size", default="26B_A4B",
+                    help="AR model size. E2B / E4B fit a 16 GB TPU and are "
+                         "for pipeline validation only -- DiffusionGemma only "
+                         "exists at 26B_A4B, so --model diffusion ignores this.")
     args = ap.parse_args()
 
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     report_devices()
 
-    builder = build_diffusion_sampler if args.model == "diffusion" else build_ar_sampler
-    sampler = builder()
+    if args.model == "diffusion":
+        sampler = build_diffusion_sampler()
+    else:
+        sampler = build_ar_sampler(args.size)
+        if args.size != "26B_A4B":
+            print(f"[warn] --size {args.size} is a SMALLER model. Validates "
+                  f"the pipeline, not the science. Real eval needs 26B_A4B.",
+                  flush=True)
 
     items = get_prompts(args.category)
     if args.limit:
@@ -125,7 +135,7 @@ def main() -> None:
             dt = time.time() - t0
             row = {
                 "idx": idx,
-                "model": args.model,
+                "model": args.model if args.model == "diffusion" else f"ar-{args.size}",
                 "category": cat,
                 "category_desc": CATEGORIES[cat],
                 "prompt": prompt,
